@@ -62,23 +62,22 @@ public:
 // CORE ORDERBOOK
 class OrderBook {
     std::vector<Order> orders;
-    std::vector<std::unique_ptr<IOrderBookObserver>> observers;
+    std::vector<std::shared_ptr<IOrderBookObserver>> observers;
     
-    OrderBook() {}
+    // std::map<double, std::vector<Order>, std::greater<double>> bids; 
+    // std::map<double, std::vector<Order>> asks;
 
 public:    
     OrderBook(const OrderBook&) = delete;
     OrderBook& operator=(const OrderBook&) = delete;
-    OrderBook(OrderBook&&) = delete;
-    OrderBook& operator=(OrderBook&&) = delete;
+    OrderBook(OrderBook&&) = default;
+    OrderBook& operator=(OrderBook&&) = default;
+    ~OrderBook() = default;
 
-    static OrderBook& getInstance() {
-        static OrderBook instance;
-        return instance;
-    }
-    
+    OrderBook() = default;
+
     // OBSERVER PATTERN
-    void addObserver(std::unique_ptr<IOrderBookObserver> obs) {
+    void addObserver(std::shared_ptr<IOrderBookObserver> obs) {
         observers.push_back(std::move(obs));
     }
 
@@ -109,9 +108,9 @@ public:
 };
 
 int main() {
-    OrderBook& ob = OrderBook::getInstance();
+    auto ob = std::make_unique<OrderBook>();
 
-    ob.addObserver(std::make_unique<Logger>());
+    ob->addObserver(std::make_shared<Logger>());
 
     auto Order1 = OrderBuilder()
         .setId(1)
@@ -120,8 +119,8 @@ int main() {
         .setQuantity(100)
         .build();
 
-    ob.addOrder(Order1);
-    ob.print();
+    ob->addOrder(Order1);
+    ob->print();
 
     return 0;
 }
