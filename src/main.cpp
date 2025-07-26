@@ -1,27 +1,14 @@
 #include <cstdint>
-#include <memory>
 #include <ostream>
 #include <vector>
 #include <print>
 #include <iostream>
-#include <type_traits>
 #include <cctype>
-#include <chrono>
 #include <string>
-#include <optional>
+#include <array>
 
-// UTIL
-template <typename Enum>
-constexpr auto to_underlying(Enum e) {
-    return static_cast<std::underlying_type_t<Enum>>(e);
-}
-
-// gets system time in ns
-uint64_t getSysTime() {
-    auto now = std::chrono::system_clock::now();
-    auto ns = std::chrono::time_point_cast<std::chrono::nanoseconds>(now);
-    return ns.time_since_epoch().count();
-}
+#include "util.cpp"
+#include "messages.cpp"
 
 enum class ErrorCode {
     SUCCESS,
@@ -43,40 +30,41 @@ enum class TimeInForce {
     GTC = 1, // Good Till Cancel
     IOC = 2, // Immediate Or Cancel
     FOK = 3  // Fill Or Kill
- };
+};
 
 // ORDER
 struct Order {
     uint64_t order_id;
 
     OrderSide side;
-    OrderExecutionType exection_type;
+    OrderExecutionType execution_type;
     TimeInForce time_in_force;
 
-    std::optional<float> price;
+    float price;
+    bool has_price;
     uint32_t quantity;
     uint64_t timestamp_ns;
 
     Order() = default;
 
-    Order(uint32_t order_id, OrderSide side, OrderExecutionType execution_type, TimeInForce time_in_force, std::optional<float> price, uint32_t quantity, uint64_t timestamp_ns)
-        : order_id(order_id), side(side), exection_type(execution_type), time_in_force(time_in_force), price(price), quantity(quantity), timestamp_ns(timestamp_ns){}
+    Order(uint32_t order_id, OrderSide side, OrderExecutionType execution_type, TimeInForce time_in_force, float price, bool has_price, uint32_t quantity, uint64_t timestamp_ns)
+        : order_id(order_id), side(side), execution_type(execution_type), time_in_force(time_in_force), price(price), has_price(has_price), quantity(quantity), timestamp_ns(timestamp_ns){}
 
     friend std::ostream& operator<<(std::ostream& os, const Order& ord) {
-            os << "Order(id=" << ord.order_id
-                << ", side=" << to_underlying(ord.side)
-                << ", policy=" << to_underlying(ord.exection_type)
-                << ", time_in_force=" << to_underlying(ord.time_in_force)
-                << ", price=";
-            if(ord.price.has_value())
-                os << *ord.price;
-            else
-                os << "nullopt";
+        os << "Order(id=" << ord.order_id
+           << ", side=" << to_underlying(ord.side)
+           << ", policy=" << to_underlying(ord.execution_type)
+           << ", time_in_force=" << to_underlying(ord.time_in_force)
+           << ", price=";
+        if(ord.has_price)
+            os << ord.price;
+        else
+            os << "MARKET";
 
-            os << ", quantity=" << ord.quantity
-                << ", timestamp=" << ord.timestamp_ns << "ns" 
-                << ")";
-            return os;
+        os << ", quantity=" << ord.quantity
+           << ", timestamp=" << ord.timestamp_ns << "ns" 
+           << ")";
+        return os;
     }
     
     class Builder {
@@ -86,7 +74,9 @@ struct Order {
         OrderExecutionType execution_type_ = OrderExecutionType::MARKET; // default to MARKET Order
         TimeInForce time_in_force_ = TimeInForce::GTC; // default to GTC order
 
-        std::optional<float> price_ {std::nullopt};
+        float price_;
+        bool has_price_ {false};
+
         uint32_t quantity_ {0};
 
     public:
@@ -94,15 +84,15 @@ struct Order {
         Builder& setSide(OrderSide side) { side_ = side; return *this; }
         Builder& setExecutionType(OrderExecutionType execution_type) { execution_type_ = execution_type; return *this;}
         Builder& setTimeInForce(TimeInForce time_in_force) { time_in_force_ = time_in_force; return *this; }
-        Builder& setPrice(float price) { price_ = price; return *this; }
+        Builder& setPrice(float price) { price_ = price; has_price_ = true; return *this; }
         Builder& setQuantity(uint32_t quantity) { quantity_ = quantity; return *this; }
 
         Order build() {
-            if (execution_type_ == OrderExecutionType::MARKET && price_.has_value()) {
+            if (execution_type_ == OrderExecutionType::MARKET && has_price_) {
                 throw std::runtime_error("Market orders should not have a price");
             }
             
-            if (execution_type_ == OrderExecutionType::LIMIT && !price_.has_value()) {
+            if (execution_type_ == OrderExecutionType::LIMIT && !has_price_) {
                 throw std::runtime_error("Limit orders require a price");
             }
             
@@ -110,12 +100,12 @@ struct Order {
                 throw std::runtime_error("Quantity must be greater than zero");
             }
 
-            return Order(id_, side_, execution_type_, time_in_force_, price_, quantity_, getSysTime());
+            return Order(id_, side_, execution_type_, time_in_force_, price_, has_price_, quantity_, getSysTime());
         }
     };
 };
 
-// OBSERVER PATTER
+// OBSERVER PATTERN
 class IOrderBookObserver {
 public:
     virtual void onOrderBookUpdate() = 0;
@@ -131,81 +121,68 @@ public:
 };
 
 // CORE ORDERBOOK
+template<int MAX_ORDERS = 10000, int MAX_OBSERVERS = 10>
 class OrderBook {
     std::vector<Order> orders;
-    std::vector<std::shared_ptr<IOrderBookObserver>> observers;
+    std::array<IOrderBookObserver*, MAX_OBSERVERS> observers;
+
+    size_t observer_count;
+    size_t order_count;
 
     // CONFIG
     std::string symbol;
-    double tick_size;
-    uint32_t max_orders;
+    float tick_size;
 
 public:    
-    OrderBook(const OrderBook&) = delete;
-    OrderBook& operator=(const OrderBook&) = delete;
-    OrderBook(OrderBook&&) = default;
-    OrderBook& operator=(OrderBook&&) = default;
     ~OrderBook() = default;
 
-    OrderBook() = default;
-
-    OrderBook(std::string symbol_, double tick_size_, uint32_t max_orders_)
-        : symbol(symbol_), tick_size(tick_size_), max_orders(max_orders_) {}
-
-    // OBSERVER PATTERN
-    // L-value existing adresses
-    void addObserver(std::shared_ptr<IOrderBookObserver>& obs) {
-        observers.push_back(std::move(obs));
+    OrderBook(const std::string& symbol_, float tick_size_)
+        : symbol(symbol_), tick_size(tick_size_), observer_count(0), order_count(0) {
+        orders.reserve(MAX_ORDERS);
+        observers.fill(nullptr);
     }
 
-    // R-value of obs
-    void addObserver(std::shared_ptr<IOrderBookObserver>&& obs) {
-        observers.push_back(std::move(obs));
+    // OBSERVER PATTERN
+    void addObserver(IOrderBookObserver* obs) {
+        if (observer_count < MAX_OBSERVERS && obs != nullptr) {
+            observers[observer_count] = obs;
+            observer_count++;
+        }
     }
 
     void notify() {
-        for(auto& obs: observers) {
-            obs->onOrderBookUpdate();
+        for(size_t i = 0; i < observer_count; ++i) {
+            if (observers[i] != nullptr) {
+                observers[i]->onOrderBookUpdate();
+            }
         }
     }
 
     void addOrder(const Order& order) {
-        orders.push_back(order);
-        notify();
+        if (order_count < MAX_ORDERS) {
+            orders.push_back(order);
+            order_count++;
+            notify();
+        }
     }
 
-    void print() {
+    void print() const {
         for(const auto& order : orders) {
             std::cout << order << " " << std::endl;
         }
     }
 
-    class Builder {
-        std::string symbol = "";
-        double tick_size = 0.01;
-        uint32_t max_orders = 10000;
-
-    public:
-        Builder& setSymbol(std::string symbol_) { symbol = symbol_; return *this; }
-        Builder& setTickSize(double tick_size_) { tick_size = tick_size_; return *this; }
-        Builder& setMaxOrders(uint32_t max_orders_) { max_orders = max_orders_; return *this;} 
-        
-        std::shared_ptr<OrderBook> build() {
-            return std::make_shared<OrderBook>(symbol, tick_size, max_orders);
-        }
-    };
+    size_t getObserverCount() { return observer_count;}
+    size_t getOrderCount() { return order_count; }
 };
 
-auto main() -> int {
-    std::shared_ptr<OrderBook> ob = OrderBook::Builder()
-        .setSymbol("AAPL")
-        .build();
-              
-    auto logger = std::make_shared<Logger>();
+int main() {
+    auto ob = OrderBook<>("AAPL", 0.01);   
+    Logger logger;
 
-    ob->addObserver(logger);
+    ob.addObserver(&logger);
 
-    auto Order1 = Order::Builder()
+    auto order1 = Order::Builder()
         .setId(1)
         .setSide(OrderSide::BUY)
         .setExecutionType(OrderExecutionType::MARKET)
@@ -213,8 +190,8 @@ auto main() -> int {
         .setQuantity(100)
         .build();
 
-    ob->addOrder(Order1);
-    ob->print();
+    ob.addOrder(order1);
+    ob.print();
 
     return 0;
 }
