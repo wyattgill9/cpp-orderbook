@@ -65,13 +65,13 @@ struct Order {
     class Builder {
         uint32_t id_ {0};
 
-        OrderSide side_ = OrderSide::BUY; // default to buy order
-        OrderExecutionType execution_type_ = OrderExecutionType::MARKET; // default to MARKET Order
-        TimeInForce time_in_force_ = TimeInForce::GTC; // default to GTC order
+        OrderSide side_ {OrderSide::BUY}; // default to buy order
+        OrderExecutionType execution_type_ {OrderExecutionType::MARKET}; // default to MARKET Order
+        TimeInForce time_in_force_ {TimeInForce::GTC}; // default to GTC order
 
         float price_ {0};
         uint32_t quantity_ {0};
-        bool has_price = false;
+        bool has_price {false};
 
     public:
         Builder& setId(uint64_t id) { id_ = id; return *this; }
@@ -121,17 +121,16 @@ class OrderBook {
     std::vector<Order> orders;
     std::array<IOrderBookObserver*, MAX_OBSERVERS> observers;
     
-    size_t order_count = 0;
-    size_t observer_count = 0;
+    size_t order_count {0};
+    size_t observer_count {0};
 
     // CONFIG 
-    char symbol[8] = {0};
+    char symbol[8] {0};
     double tick_size;
 
 public:    
     OrderBook() {
         orders.reserve(MAX_ORDERS);
-        observers.fill(nullptr);
     }
        
     OrderBook(const std::string& sym, double ts) : tick_size(ts) {
@@ -157,17 +156,17 @@ public:
     bool removeObserver(IOrderBookObserver* obs) {
         for (size_t i = 0; i < observer_count; ++i) {
             if (observers[i] == obs) {
-                for (size_t j = i; j < observer_count - 1; ++j) {
-                    observers[j] = observers[j + 1];
+                --observer_count;
+                if (i != observer_count) {
+                    observers[i] = observers[observer_count];
                 }
-                observers[observer_count - 1] = nullptr;
-                observer_count--;
+                observers[observer_count] = nullptr;
                 return true;
             }
         }
         return false;
     }
-
+    
     void notify() {
         for (size_t i = 0; i < observer_count; ++i) {
             observers[i]->onOrderBookUpdate();
@@ -194,10 +193,12 @@ public:
     bool full() const noexcept { return order_count >= MAX_ORDERS; }
     const char* getSymbol() const noexcept { return symbol; }
     double getTickSize() const noexcept { return tick_size; }
+    size_t getObserverCount() const noexcept { return observer_count; }
+
 };
 
 int main() {
-    auto ob = OrderBook<10000, 5>("AAPL", 0.01);
+    auto ob = OrderBook("AAPL", 0.01);
     Logger logger;
     
     ob.addObserver(&logger);
@@ -212,6 +213,9 @@ int main() {
             .build();
 
         ob.addOrder(order1);                 
+        ob.removeObserver(&logger);
+
+        std::cout << ob.getObserverCount() << std::endl;
     });
 
     std::cout << "Elapsed: " << elapsed << " ns" << std::endl;
