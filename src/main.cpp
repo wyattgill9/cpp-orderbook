@@ -1,13 +1,30 @@
 #include <ostream>
-#include <vector>
 #include <array>
 #include <print>
 #include <iostream>
 #include <cctype>
+#include <pthread.h>
 #include <string>
 #include <algorithm>
+#include <cstring>
+#include <vector>
 
 #include "messages.cpp"
+
+// OBSERVER PATTERN 
+class IOrderBookObserver {
+public:
+    virtual void onOrderBookUpdate() = 0;
+    virtual ~IOrderBookObserver() = default;
+};
+
+class Logger final : public IOrderBookObserver {
+public:
+    void onOrderBookUpdate() override {
+        std::cout << "OrderBook updated\n";
+    }
+    ~Logger() override = default;
+};
 
 enum class OrderSide {
     BUY = 0, // B
@@ -63,11 +80,9 @@ struct Order {
     
     class Builder {
         u32 id_ {0};
-
         OrderSide side_ {OrderSide::BUY}; // default to buy order
         OrderExecutionType execution_type_ {OrderExecutionType::MARKET}; // default to MARKET Order
         TimeInForce time_in_force_ {TimeInForce::GTC}; // default to GTC order
-
         f32 price_ {0};
         u32 quantity_ {0};
         u64 timestamp_ns_ {0};
@@ -76,20 +91,15 @@ struct Order {
     public:
         Builder& setTimestamp(u64 timestamp_ns) { timestamp_ns_ = timestamp_ns; return *this; }
         Builder& setId(u64 id) { id_ = id; return *this; }
+
         Builder& setSide(u8 side) {
             switch(side) {
-                case 'B' : {
-                    side_ = OrderSide::BUY;
-                    break;
-                }
-                case 'S' : {
-                    side_ = OrderSide::SELL;
-                    break;        
-                }
+                case 'B' : side_ = OrderSide::BUY; break;
+                case 'S' : side_ = OrderSide::SELL; break;
             }
-           
             return *this;
         }
+
         Builder& setExecutionType(OrderExecutionType execution_type) { execution_type_ = execution_type; return *this;}
         Builder& setTimeInForce(TimeInForce time_in_force) { time_in_force_ = time_in_force; return *this; }
         Builder& setPrice(f32 price) { price_ = price; has_price = true; return *this; }
@@ -113,65 +123,138 @@ struct Order {
     };
 };
 
-// OBSERVER PATTERN 
-class IOrderBookObserver {
-public:
-    virtual void onOrderBookUpdate() = 0;
-    virtual ~IOrderBookObserver() = default;
+template <size_t N>
+struct FixedRingBuffer {
+    Order data[N];
+    size_t head = 0;
+    size_t tail = 0;
+    size_t count = 0;
+
+    bool push_back(const Order& order) {
+        if (count == N) return false; // full
+        data[tail] = order;
+        tail = (tail + 1) % N;
+        ++count;
+        return true;
+    }
+
+    bool pop_front() {
+        if (count == 0) return false;
+        head = (head + 1) % N;
+        --count;
+        return true;
+    }
+
+    Order& front() {
+        return data[head];
+    }
+
+    const Order& front() const {
+        return data[head];
+    }
+
+    // iterator
+    struct Iterator {
+        const FixedRingBuffer* buffer;
+        size_t index;
+        size_t remaining;
+
+        Iterator(const FixedRingBuffer* buf, size_t idx, size_t rem)
+            : buffer(buf), index(idx), remaining(rem) {}
+
+        const Order& operator*() const {
+            return buffer->data[index];
+        }
+
+        Iterator& operator++() {
+            index = (index + 1) % N;
+            --remaining;
+            return *this;
+        }
+
+        bool operator!=(const Iterator& other) const {
+            return remaining != other.remaining;
+        }
+    };
+
+    Iterator begin() const {
+        return Iterator(this, head, count);
+    }
+
+    Iterator end() const {
+        return Iterator(this, 0, 0);
+    }
 };
 
-class Logger final : public IOrderBookObserver {
-public:
+struct PriceLevel {
+    static constexpr size_t MAX_ORDERS = 1000;
+    FixedRingBuffer<MAX_ORDERS> orders;
 
-    void onOrderBookUpdate() override {
-        // std::cout << "OrderBook updated\n";
+    f32 price {0.0f};
+    bool active {false};
+
+    void addOrder(const Order& order) {
+        orders.push_back(order);
     }
-    ~Logger() override = default;
+
+    void popFront() {
+        orders.pop_front();
+    }
+
+    void print() const {
+        for(auto& order : orders) {
+            std::cout << order << std::endl;
+        }
+    }
 };
 
 // CORE ORDERBOOK
-template<size_t MAX_ORDERS = 10000, size_t MAX_OBSERVERS = 10>
+template<size_t MAX_PRICE_LEVELS = 100>
 class OrderBook {  
-    std::array<Order, MAX_ORDERS> orders;
-    std::array<IOrderBookObserver*, MAX_OBSERVERS> observers;
-    
-    size_t order_count {0};
+    std::vector<IOrderBookObserver*> observers;
     size_t observer_count {0};
+
+    std::array<PriceLevel, MAX_PRICE_LEVELS> bids; // the highest price a buyer is currently willing to pay
+    std::array<PriceLevel, MAX_PRICE_LEVELS> asks; // the lowest price a seller is willing to accept
 
     // CONFIG 
     char symbol[8] {0};
     f32 tick_size;
+    f32 base_price;
+
+    size_t priceToIndex(f32 price) const {
+        return static_cast<size_t>((price - base_price) / tick_size);
+    }
 
 public:    
     OrderBook() = default;
-       
-    OrderBook(const std::string& sym, f32 ts) : tick_size(ts) {      
-        size_t len = std::min(sym.length(), sizeof(symbol) - 1);
-        std::copy_n(sym.c_str(), len, symbol);
-        symbol[len] = '\0';
-    }
+      
+    OrderBook(const std::string& sym, f32 ts = 0.01, f32 base_price = 0.0f)
+        : tick_size(ts), base_price(base_price) {
+        // symbol
+        std::snprintf(symbol, sizeof(symbol), "%s", sym.c_str());
 
-    // OBSERVER PATTERN 
-    bool addObserver(IOrderBookObserver* obs) {
-        if (observer_count >= MAX_OBSERVERS || obs == nullptr) {
-            return false;
+        // init array
+        for (size_t i = 0; i < MAX_PRICE_LEVELS; ++i) {
+            bids[i].price = base_price + (i * tick_size);
+            bids[i].active = false;
+
+            asks[i].price = base_price + (i * tick_size);
+            asks[i].active = false;
         }
-        
-        observers[observer_count] = obs;
+    }
+    
+    bool addObserver(IOrderBookObserver* obs) {
+        observers.push_back(obs);
         observer_count++;
         return true;
     }
 
     bool removeObserver(IOrderBookObserver* obs) {
-        for (size_t i = 0; i < observer_count; ++i) {
-            if (observers[i] == obs) {
-                --observer_count;
-                if (i != observer_count) {
-                    observers[i] = observers[observer_count];
-                }
-                observers[observer_count] = nullptr;
-                return true;
-            }
+        auto it = std::find(observers.begin(), observers.end(), obs);
+        if (it != observers.end()) {
+            observers.erase(it);
+            return true;
         }
         return false;
     }
@@ -183,22 +266,46 @@ public:
     }
 
     void addOrder(const Order& order) {
-        if (order_count >= MAX_ORDERS) {
-            throw std::runtime_error("OrderBook is full");
+        if (!order.has_price) {
+            // handle market order
+            notify();
+            return;
         }
-        
-        orders[order_count] = order;
+
+        size_t price_index = priceToIndex(order.price);
+
+        switch (order.side) {
+            case OrderSide::BUY: {
+                PriceLevel& level = bids[price_index];
+                level.addOrder(order);
+                level.active = true;
+                break;
+            }
+            case OrderSide::SELL: {
+                PriceLevel& level = asks[price_index];
+                level.addOrder(order);
+                level.active = true;
+                break;
+            }
+            default:
+                break;
+        }
+
         notify();
     }
 
     void print() const {
-        for (size_t i = 0; i < order_count; ++i) {
-            std::cout << orders[i] << "\n";
+        for (size_t i = 0; i < MAX_PRICE_LEVELS; ++i) {
+            if (bids[i].active)
+                bids[i].print();
+        }
+
+        for (size_t i = 0; i < MAX_PRICE_LEVELS; ++i) {
+            if (asks[i].active)
+                asks[i].print();
         }
     }
-
-    size_t size() const noexcept { return order_count; }
-    bool full() const noexcept { return order_count >= MAX_ORDERS; }
+    
     const char* getSymbol() const noexcept { return symbol; }
     f32 getTickSize() const noexcept { return tick_size; }
     size_t getObserverCount() const noexcept { return observer_count; }
@@ -257,7 +364,7 @@ void edit_book(const uint8_t* ptr, size_t size, OrderBook<>& ob) {
 }
 
 int main() {
-    auto ob = OrderBook<>("AAPL", 0.01);
+    auto ob = OrderBook<>("AAPL");
 
     Logger logger;
     ob.addObserver(&logger);
@@ -275,7 +382,7 @@ int main() {
         .buy_sell_indicator = 'B',
         .shares = 1000,
         .stock = "AAPL",
-        .price = 100
+        .price = 0.01
     };
 
     std::memcpy(buffer, &a, sizeof(a));
