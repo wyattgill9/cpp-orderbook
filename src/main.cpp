@@ -8,10 +8,12 @@
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <map>
+#include <deque>
 
+// #include "FixedRingBuffer.h"
 #include "messages.cpp"
 
-// OBSERVER PATTERN 
 class IOrderBookObserver {
 public:
     virtual void onOrderBookUpdate() = 0;
@@ -21,14 +23,14 @@ public:
 class Logger final : public IOrderBookObserver {
 public:
     void onOrderBookUpdate() override {
-        std::cout << "OrderBook updated\n";
+        // std::cout << "OrderBook updated\n";
     }
     ~Logger() override = default;
 };
 
 enum class OrderSide {
-    BUY = 0, // B
-    SELL = 1 // S
+    BUY = 0,
+    SELL = 1
 };
 
 enum class OrderExecutionType {
@@ -38,12 +40,11 @@ enum class OrderExecutionType {
 
 enum class TimeInForce {
     DAY = 0,
-    GTC = 1, // Good Till Cancel
-    IOC = 2, // Immediate Or Cancel
-    FOK = 3  // Fill Or Kill
+    GTC = 1,
+    IOC = 2,
+    FOK = 3
  };
 
-// ORDER
 struct Order {
     u64 order_id;
 
@@ -80,9 +81,9 @@ struct Order {
     
     class Builder {
         u32 id_ {0};
-        OrderSide side_ {OrderSide::BUY}; // default to buy order
-        OrderExecutionType execution_type_ {OrderExecutionType::MARKET}; // default to MARKET Order
-        TimeInForce time_in_force_ {TimeInForce::GTC}; // default to GTC order
+        OrderSide side_ {OrderSide::BUY};
+        OrderExecutionType execution_type_ {OrderExecutionType::MARKET};
+        TimeInForce time_in_force_ {TimeInForce::GTC};
         f32 price_ {0};
         u32 quantity_ {0};
         u64 timestamp_ns_ {0};
@@ -92,8 +93,8 @@ struct Order {
         Builder& setTimestamp(u64 timestamp_ns) { timestamp_ns_ = timestamp_ns; return *this; }
         Builder& setId(u64 id) { id_ = id; return *this; }
 
-        Builder& setSide(u8 side) {
-            switch(side) {
+        Builder& setSide(std::byte side) {
+            switch(static_cast<char>(side)) {
                 case 'B' : side_ = OrderSide::BUY; break;
                 case 'S' : side_ = OrderSide::SELL; break;
             }
@@ -123,76 +124,10 @@ struct Order {
     };
 };
 
-template <size_t N>
-struct FixedRingBuffer {
-    Order data[N];
-    size_t head = 0;
-    size_t tail = 0;
-    size_t count = 0;
-
-    bool push_back(const Order& order) {
-        if (count == N) return false; // full
-        data[tail] = order;
-        tail = (tail + 1) % N;
-        ++count;
-        return true;
-    }
-
-    bool pop_front() {
-        if (count == 0) return false;
-        head = (head + 1) % N;
-        --count;
-        return true;
-    }
-
-    Order& front() {
-        return data[head];
-    }
-
-    const Order& front() const {
-        return data[head];
-    }
-
-    // iterator
-    struct Iterator {
-        const FixedRingBuffer* buffer;
-        size_t index;
-        size_t remaining;
-
-        Iterator(const FixedRingBuffer* buf, size_t idx, size_t rem)
-            : buffer(buf), index(idx), remaining(rem) {}
-
-        const Order& operator*() const {
-            return buffer->data[index];
-        }
-
-        Iterator& operator++() {
-            index = (index + 1) % N;
-            --remaining;
-            return *this;
-        }
-
-        bool operator!=(const Iterator& other) const {
-            return remaining != other.remaining;
-        }
-    };
-
-    Iterator begin() const {
-        return Iterator(this, head, count);
-    }
-
-    Iterator end() const {
-        return Iterator(this, 0, 0);
-    }
-};
-
 struct PriceLevel {
-    static constexpr size_t MAX_ORDERS = 1000;
-    FixedRingBuffer<MAX_ORDERS> orders;
-
+    std::deque<Order> orders;
     f32 price {0.0f};
-    bool active {false};
-
+    
     void addOrder(const Order& order) {
         orders.push_back(order);
     }
@@ -208,40 +143,22 @@ struct PriceLevel {
     }
 };
 
-// CORE ORDERBOOK
-template<size_t MAX_PRICE_LEVELS = 100>
 class OrderBook {  
     std::vector<IOrderBookObserver*> observers;
     size_t observer_count {0};
 
-    std::array<PriceLevel, MAX_PRICE_LEVELS> bids; // the highest price a buyer is currently willing to pay
-    std::array<PriceLevel, MAX_PRICE_LEVELS> asks; // the lowest price a seller is willing to accept
+    std::map<f32, PriceLevel> bids;
+    std::map<f32, PriceLevel> asks;
 
-    // CONFIG 
     char symbol[8] {0};
     f32 tick_size;
-    f32 base_price;
-
-    size_t priceToIndex(f32 price) const {
-        return static_cast<size_t>((price - base_price) / tick_size);
-    }
 
 public:    
     OrderBook() = default;
       
-    OrderBook(const std::string& sym, f32 ts = 0.01, f32 base_price = 0.0f)
-        : tick_size(ts), base_price(base_price) {
-        // symbol
+    OrderBook(const std::string& sym, f32 ts = 0.01)
+        : tick_size(ts) {
         std::snprintf(symbol, sizeof(symbol), "%s", sym.c_str());
-
-        // init array
-        for (size_t i = 0; i < MAX_PRICE_LEVELS; ++i) {
-            bids[i].price = base_price + (i * tick_size);
-            bids[i].active = false;
-
-            asks[i].price = base_price + (i * tick_size);
-            asks[i].active = false;
-        }
     }
     
     bool addObserver(IOrderBookObserver* obs) {
@@ -267,24 +184,21 @@ public:
 
     void addOrder(const Order& order) {
         if (!order.has_price) {
-            // handle market order
             notify();
             return;
         }
 
-        size_t price_index = priceToIndex(order.price);
-
         switch (order.side) {
             case OrderSide::BUY: {
-                PriceLevel& level = bids[price_index];
+                PriceLevel& level = bids[order.price];
+                level.price = order.price;
                 level.addOrder(order);
-                level.active = true;
                 break;
             }
             case OrderSide::SELL: {
-                PriceLevel& level = asks[price_index];
+                PriceLevel& level = asks[order.price];
+                level.price = order.price;
                 level.addOrder(order);
-                level.active = true;
                 break;
             }
             default:
@@ -295,14 +209,12 @@ public:
     }
 
     void print() const {
-        for (size_t i = 0; i < MAX_PRICE_LEVELS; ++i) {
-            if (bids[i].active)
-                bids[i].print();
+        for (const auto& [price, level] : bids) {
+            level.print();
         }
 
-        for (size_t i = 0; i < MAX_PRICE_LEVELS; ++i) {
-            if (asks[i].active)
-                asks[i].print();
+        for (const auto& [price, level] : asks) {
+            level.print();
         }
     }
     
@@ -311,26 +223,30 @@ public:
     size_t getObserverCount() const noexcept { return observer_count; }
 };
 
-static constexpr size_t message_sizes[256] = {
-    ['A'] = sizeof(AddOrderNoMPIDMessage),
-    ['D'] = sizeof(OrderDeleteMessage),
-    ['X'] = sizeof(OrderCancelMessage),
-    ['E'] = sizeof(OrderExecutedMessage),
-};
+static constexpr size_t message_sizes[256] = {0};
 
-void edit_book(const uint8_t* ptr, size_t size, OrderBook<>& ob) {
-    const uint8_t* end = ptr + size;
+constexpr size_t get_message_size(std::byte c) {
+    switch (static_cast<char>(c)) {
+        case 'A': return sizeof(AddOrderNoMPIDMessage);
+        case 'D': return sizeof(OrderDeleteMessage);
+        case 'X': return sizeof(OrderCancelMessage);
+        case 'E': return sizeof(OrderExecutedMessage);
+        default: return 0;
+    }
+}
+
+void edit_book(const std::byte* ptr, size_t size, OrderBook& ob) {
+    const std::byte* end = ptr + size;
 
     while (ptr < end) {
-        uint8_t type = *ptr;
-        size_t msg_size = message_sizes[type];
+        std::byte type = *ptr;
+        size_t msg_size = get_message_size(type);
         if (msg_size == 0 || ptr + msg_size > end) break;
 
-        switch(type) {
+        switch(static_cast<char>(type)) {
             case 'A' : {
                 const auto* msg = reinterpret_cast<const AddOrderNoMPIDMessage*>(ptr);
 
-                // ASSUMING ALL INCOMING ORDERS ARE FOR THE SAME SECURITY/PAIR
                 Order order = Order::Builder()
                     .setTimestamp(msg->header.timestamp)
                     .setId(msg->order_reference_number)
@@ -364,12 +280,12 @@ void edit_book(const uint8_t* ptr, size_t size, OrderBook<>& ob) {
 }
 
 int main() {
-    auto ob = OrderBook<>("AAPL");
+    auto ob = OrderBook("AAPL");
 
     Logger logger;
     ob.addObserver(&logger);
 
-    u8 buffer[64];
+    std::byte buffer[64];
     
     AddOrderNoMPIDMessage a = {
         .header = {
@@ -379,7 +295,7 @@ int main() {
             .timestamp = 1
         },
         .order_reference_number = 1,
-        .buy_sell_indicator = 'B',
+        .buy_sell_indicator = static_cast<std::byte>('B'),
         .shares = 1000,
         .stock = "AAPL",
         .price = 0.01

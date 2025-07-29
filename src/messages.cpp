@@ -13,7 +13,7 @@ struct __attribute__((packed)) MessageHeader {
 struct __attribute__((packed)) AddOrderNoMPIDMessage {
     MessageHeader header;
     u64 order_reference_number;
-    u8 buy_sell_indicator;
+    std::byte buy_sell_indicator; // use to be u8
     u32 shares;
     char stock[8];
     f32 price;
