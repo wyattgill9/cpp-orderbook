@@ -1,9 +1,10 @@
-#include <ostream>
+#include <iostream>
 #include <array>
 #include <print>
 #include <iostream>
 #include <cctype>
 #include <pthread.h>
+#include <stdexcept>
 #include <string>
 #include <algorithm>
 #include <cstring>
@@ -46,7 +47,7 @@ enum class TimeInForce {
  };
 
 struct Order {
-    u64 order_id;
+    u64 order_reference_id;
 
     OrderSide side;
     OrderExecutionType exection_type;
@@ -59,11 +60,11 @@ struct Order {
 
     Order() = default;
 
-    Order(u64 order_id, OrderSide side, OrderExecutionType execution_type, TimeInForce time_in_force, f32 price, u32 quantity, u64 timestamp_ns)
-        : order_id(order_id), side(side), exection_type(execution_type), time_in_force(time_in_force), price(price), quantity(quantity), timestamp_ns(timestamp_ns), has_price(execution_type == OrderExecutionType::LIMIT) {}
+    Order(u64 order_reference_id, OrderSide side, OrderExecutionType execution_type, TimeInForce time_in_force, f32 price, u32 quantity, u64 timestamp_ns)
+        : order_reference_id(order_reference_id), side(side), exection_type(execution_type), time_in_force(time_in_force), price(price), quantity(quantity), timestamp_ns(timestamp_ns), has_price(execution_type == OrderExecutionType::LIMIT) {}
 
     friend std::ostream& operator<<(std::ostream& os, const Order& ord) {
-            os << "Order(id=" << ord.order_id
+            os << "Order(id=" << ord.order_reference_id
                 << ", side=" << to_underlying(ord.side)
                 << ", policy=" << to_underlying(ord.exection_type)
                 << ", time_in_force=" << to_underlying(ord.time_in_force)
@@ -125,15 +126,18 @@ struct Order {
 };
 
 struct PriceLevel {
+    // BoundedQueue<Order, 1000000> orders;
     std::deque<Order> orders;
     f32 price {0.0f};
     
     void addOrder(const Order& order) {
-        orders.push_back(order);
+        orders.emplace_back(order);
     }
 
-    void popFront() {
+    Order popFront() {
+        Order order = orders.front();
         orders.pop_front();
+        return order;
     }
 
     void print() const {
@@ -147,7 +151,7 @@ class OrderBook {
     std::vector<IOrderBookObserver*> observers;
     size_t observer_count {0};
 
-    std::map<f32, PriceLevel> bids;
+    std::map<f32, PriceLevel, std::greater<f32>> bids;
     std::map<f32, PriceLevel> asks;
 
     char symbol[8] {0};
@@ -208,6 +212,34 @@ public:
         notify();
     }
 
+    // 'D'
+    // struct __attribute__((packed)) OrderDeleteMessage {
+    //     MessageHeader header;
+    //     u64 order_reference_number;
+    // };
+
+    Order getOrderFromId(u64 order_id);
+
+    Order removeOrder(u64 order_id) {
+        Order order = getOrderFromId(order_id);
+        // remove it from the deque by iterator
+    }
+
+    Order cancelOrder(u64 order_id, u32 cancelled_shares);
+
+    
+    // modify order, reduce amount
+    // 'E'
+    // struct __attribute__((packed)) OrderExecutedMessage {
+    //     MessageHeader header;
+    //     u64 order_reference_number;
+    //     u32 executed_shares;
+    //     u64 match_number;
+    // };
+
+    bool executeOrder(u64 order_id, u32 executed_shares, u64 match_number);
+    
+
     void print() const {
         for (const auto& [price, level] : bids) {
             level.print();
@@ -245,7 +277,7 @@ void edit_book(const std::byte* ptr, size_t size, OrderBook& ob) {
 
         switch(static_cast<char>(type)) {
             case 'A' : {
-                const auto* msg = reinterpret_cast<const AddOrderNoMPIDMessage*>(ptr);
+                const AddOrderNoMPIDMessage* msg = reinterpret_cast<const AddOrderNoMPIDMessage*>(ptr);
 
                 Order order = Order::Builder()
                     .setTimestamp(msg->header.timestamp)
@@ -261,16 +293,28 @@ void edit_book(const std::byte* ptr, size_t size, OrderBook& ob) {
                 
                 break;
             }
+
             case 'D' : {
-                const auto* msg = reinterpret_cast<const OrderDeleteMessage*>(ptr);    
+                const OrderDeleteMessage* msg = reinterpret_cast<const OrderDeleteMessage*>(ptr);    
+
+                ob.removeOrder(msg->order_reference_number);
+
                 break;
             }
+
             case 'X' : {
-                const auto* msg = reinterpret_cast<const OrderCancelMessage*>(ptr);    
+                const OrderCancelMessage* msg = reinterpret_cast<const OrderCancelMessage*>(ptr);    
+
+                ob.cancelOrder(msg->order_reference_number, msg->cancelled_shares);
+
                 break;
             }
+
             case 'E' : {
-                const auto* msg = reinterpret_cast<const OrderCancelMessage*>(ptr);    
+                const OrderExecutedMessage* msg = reinterpret_cast<const OrderExecutedMessage*>(ptr);    
+
+                ob.executeOrder(msg->order_reference_number, msg->executed_shares, msg->match_number);
+
                 break;
             }
         }
@@ -303,13 +347,11 @@ int main() {
 
     std::memcpy(buffer, &a, sizeof(a));
 
-    auto elapsed = time_ns([&] {
-        edit_book(buffer, 64, ob);
-    });
-    
-    std::cout << "Elapsed: " << elapsed << std::endl;
+    for(int i = 0; i < 1000000; i++) {
+        ob.addOrder(Order(i, OrderSide::BUY, OrderExecutionType::LIMIT, TimeInForce::GTC, 100.0, 100, i));
+    }
 
-    ob.print();
+    // ob.print();
 
     return 0;
 }
