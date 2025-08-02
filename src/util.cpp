@@ -15,6 +15,14 @@ using i64 = int64_t;
 using f32 = float;
 using f64 = double;
 
+enum LogLevel { DEBUG, INFO, WARNING, ERROR };
+
+#define LOG(level, msg) \
+    if (level >= CURRENT_LOG_LEVEL) \
+        std::cout << #level << ": " << __FILE__ << ":" << __LINE__ << " - " << msg << std::endl
+
+#define CURRENT_LOG_LEVEL DEBUG
+
 template<typename T, std::size_t N>
 class BoundedQueue {
     alignas(T) std::byte buffer[N * sizeof(T)];

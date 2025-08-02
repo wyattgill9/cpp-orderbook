@@ -1,3 +1,6 @@
+#include <atomic>
+#include <cassert>
+#include <chrono>
 #include <iostream>
 #include <array>
 #include <print>
@@ -8,12 +11,23 @@
 #include <string>
 #include <algorithm>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 #include <map>
 #include <deque>
+#include <variant>
+#include <thread>
+#include <stop_token>
+
+#include "SPSCQueue.h"
+
+template<class ...Ts> struct overloaded : Ts... { using Ts::operator()...; };
+template<class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
 
 // #include "FixedRingBuffer.h"
 #include "messages.cpp"
+
+#define DEBUG 1
 
 class IOrderBookObserver {
 public:
@@ -125,46 +139,109 @@ struct Order {
     };
 };
 
-struct PriceLevel {
-    // BoundedQueue<Order, 1000000> orders;
-    std::deque<Order> orders;
-    f32 price {0.0f};
-    
-    void addOrder(const Order& order) {
-        orders.emplace_back(order);
-    }
-
-    Order popFront() {
-        Order order = orders.front();
-        orders.pop_front();
-        return order;
-    }
-
-    void print() const {
-        for(auto& order : orders) {
-            std::cout << order << std::endl;
-        }
-    }
-};
+using OrderMessage = std::variant<
+    std::monostate,
+    AddOrderNoMPIDMessage,
+    OrderDeleteMessage,
+    OrderCancelMessage,
+    OrderExecutedMessage
+>;
 
 class OrderBook {  
     std::vector<IOrderBookObserver*> observers;
     size_t observer_count {0};
 
-    std::map<f32, PriceLevel, std::greater<f32>> bids;
-    std::map<f32, PriceLevel> asks;
-
+    // Store orders by ID
+    std::unordered_map<u64, Order> orders;
+        
+    // Price levels just store order IDs, not copies
+    std::map<f32, std::deque<u64>, std::greater<f32>> bids;
+    std::map<f32, std::deque<u64>> asks;    
+    // BoundedQueue<Order, 1000000> orders;
+    
     char symbol[8] {0};
     f32 tick_size;
 
+    // SPSC Queue for incoming messages
+    rigtorp::SPSCQueue<OrderMessage> message_queue;
+    std::atomic<bool> running {false};
+    std::thread processing_thread;
+
 public:    
-    OrderBook() = default;
-      
+    OrderBook() : message_queue(10000) {} 
+
     OrderBook(const std::string& sym, f32 ts = 0.01)
-        : tick_size(ts) {
+        : tick_size(ts), message_queue(10000) {
         std::snprintf(symbol, sizeof(symbol), "%s", sym.c_str());
     }
-    
+
+    void submitMessage(const OrderMessage& message) {
+        std::ignore = message_queue.try_push(message);
+    }
+
+    void start() {
+        running = true;
+        processing_thread = std::thread(&OrderBook::processMessages, this);
+    }
+
+    void stop() {
+        running = false;
+        if(processing_thread.joinable()) {
+            processing_thread.join();
+        } 
+    }
+
+    void processMessages() {
+        while(running) {
+            OrderMessage* msg = message_queue.front();
+        
+            if(!std::holds_alternative<std::monostate>(*msg)) {
+                processMessage(*msg);
+            }
+
+            message_queue.pop();
+        }
+
+        while(true) {
+            OrderMessage* msg = message_queue.front();
+            if(msg == nullptr) break;
+        
+            processMessage(*msg);
+            message_queue.pop();
+        }
+    }
+
+
+    void processMessage(const OrderMessage& msg) {
+        std::visit(overloaded {
+            [this] (const AddOrderNoMPIDMessage& msg) {
+                Order order = Order::Builder()
+                    .setTimestamp(msg.header.timestamp)
+                    .setId(msg.order_reference_number)
+                    .setSide(msg.buy_sell_indicator)
+                    .setExecutionType(OrderExecutionType::LIMIT)
+                    .setTimeInForce(TimeInForce::GTC)
+                    .setPrice(msg.price)
+                    .setQuantity(msg.shares)
+                    .build();
+
+                addOrder(order);
+            },
+            [this] (const OrderDeleteMessage& msg) {    
+                removeOrderFromId(msg.order_reference_number);
+            },
+            [this] (const OrderCancelMessage& msg) {
+                cancelOrder(msg.order_reference_number, msg.cancelled_shares);
+            },
+            [this] (const OrderExecutedMessage& msg) {
+                executeOrder(msg.order_reference_number, msg.executed_shares, msg.match_number);
+            },
+            [this] (const std::monostate) {}
+        }, msg);
+
+        print();
+    }
+               
     bool addObserver(IOrderBookObserver* obs) {
         observers.push_back(obs);
         observer_count++;
@@ -192,70 +269,88 @@ public:
             return;
         }
 
-        switch (order.side) {
-            case OrderSide::BUY: {
-                PriceLevel& level = bids[order.price];
-                level.price = order.price;
-                level.addOrder(order);
-                break;
-            }
-            case OrderSide::SELL: {
-                PriceLevel& level = asks[order.price];
-                level.price = order.price;
-                level.addOrder(order);
-                break;
-            }
-            default:
-                break;
+        orders[order.order_reference_id] = order;
+        
+        if (order.side == OrderSide::BUY) {
+            bids[order.price].push_back(order.order_reference_id);
+        } else {
+            asks[order.price].push_back(order.order_reference_id);
         }
 
         notify();
     }
 
-    // 'D'
-    // struct __attribute__((packed)) OrderDeleteMessage {
-    //     MessageHeader header;
-    //     u64 order_reference_number;
-    // };
-
-    Order getOrderFromId(u64 order_id);
-
-    Order removeOrder(u64 order_id) {
-        Order order = getOrderFromId(order_id);
-        // remove it from the deque by iterator
+    Order& getOrderFromId(u64 order_id) {
+        return orders.at(order_id);
     }
 
-    Order cancelOrder(u64 order_id, u32 cancelled_shares);
+    Order removeOrderFromId(u64 order_id) {
+        Order order = orders.at(order_id);
+        
+        auto& level = (order.side == OrderSide::BUY) ? bids[order.price] : asks[order.price];
+        level.erase(std::find(level.begin(), level.end(), order_id));
+        
+        if (level.empty()) {
+            if (order.side == OrderSide::BUY) {
+                bids.erase(order.price);
+            } else {
+                asks.erase(order.price);
+            }
+        }
+        
+        orders.erase(order_id);
+        
+        return order;
+    }
 
-    
-    // modify order, reduce amount
-    // 'E'
-    // struct __attribute__((packed)) OrderExecutedMessage {
-    //     MessageHeader header;
-    //     u64 order_reference_number;
-    //     u32 executed_shares;
-    //     u64 match_number;
-    // };
+    void cancelOrder(u64 order_id, u32 cancelled_shares) {
+        Order& order = getOrderFromId(order_id);
+        order.quantity -= cancelled_shares;
+        
+        if (order.quantity == 0) {
+            removeOrderFromId(order_id);
+        }       
+    }   
 
-    bool executeOrder(u64 order_id, u32 executed_shares, u64 match_number);
-    
+    void executeOrder(u64 order_id, u32 executed_shares, u64 match_order_id) {
+        Order& order = getOrderFromId(order_id);
+        order.quantity -= executed_shares;
+
+        Order& match_order = getOrderFromId(match_order_id);
+        match_order.quantity -= executed_shares;
+       
+        if (order.quantity == 0) {
+            removeOrderFromId(order_id);
+        }
+
+        if(match_order.quantity == 0) {
+            removeOrderFromId(match_order_id);
+        }
+    }   
 
     void print() const {
-        for (const auto& [price, level] : bids) {
-            level.print();
+        std::cout << "--- BIDS ---" << std::endl;
+        for (const auto& [price, order_ids] : bids) {
+            std::cout << "Price " << price << ":" << std::endl;
+            for (u64 order_id : order_ids) {
+                std::cout << "  " << orders.at(order_id) << std::endl;
+            }
         }
 
-        for (const auto& [price, level] : asks) {
-            level.print();
+        std::cout << "--- ASKS ---" << std::endl;
+        for (const auto& [price, order_ids] : asks) {
+            std::cout << "Price " << price << ":" << std::endl;
+            for (u64 order_id : order_ids) {
+                std::cout << "  " << orders.at(order_id) << std::endl;
+            }
         }
+        std::cout << std::endl;
     }
-    
+ 
     const char* getSymbol() const noexcept { return symbol; }
     f32 getTickSize() const noexcept { return tick_size; }
     size_t getObserverCount() const noexcept { return observer_count; }
 };
-
-static constexpr size_t message_sizes[256] = {0};
 
 constexpr size_t get_message_size(std::byte c) {
     switch (static_cast<char>(c)) {
@@ -297,7 +392,7 @@ void edit_book(const std::byte* ptr, size_t size, OrderBook& ob) {
             case 'D' : {
                 const OrderDeleteMessage* msg = reinterpret_cast<const OrderDeleteMessage*>(ptr);    
 
-                ob.removeOrder(msg->order_reference_number);
+                ob.removeOrderFromId(msg->order_reference_number);
 
                 break;
             }
@@ -318,20 +413,30 @@ void edit_book(const std::byte* ptr, size_t size, OrderBook& ob) {
                 break;
             }
         }
-   
+
+        #if DEBUG
+            ob.print();
+        #endif
+
         ptr += msg_size;
     }
 }
+
+// void test() 
+// {
+//  assert(1 == 1);
+// }
+
 
 int main() {
     auto ob = OrderBook("AAPL");
 
     Logger logger;
     ob.addObserver(&logger);
+   
+    ob.start();
 
-    std::byte buffer[64];
-    
-    AddOrderNoMPIDMessage a = {
+    AddOrderNoMPIDMessage add_order = {
         .header = {
             .message_type = 'A',
             .stock_locate = 0,
@@ -345,13 +450,21 @@ int main() {
         .price = 0.01
     };
 
-    std::memcpy(buffer, &a, sizeof(a));
+    OrderDeleteMessage cancel_order = {
+        .header = {
+            .message_type = 'D',
+            .stock_locate = 0,
+            .tracking_number = 0,
+            .timestamp = 1
+        },
+        .order_reference_number = 1,
+    };
 
-    for(int i = 0; i < 1000000; i++) {
-        ob.addOrder(Order(i, OrderSide::BUY, OrderExecutionType::LIMIT, TimeInForce::GTC, 100.0, 100, i));
-    }
+    ob.submitMessage(add_order);
 
-    // ob.print();
+    ob.submitMessage(cancel_order);
+
+    ob.stop();
 
     return 0;
 }
