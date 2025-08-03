@@ -1,5 +1,4 @@
 #pragma once
-#include "util.cpp"
 
 struct __attribute__((packed)) MessageHeader {
     u8 message_type;
@@ -40,3 +39,13 @@ struct __attribute__((packed)) OrderExecutedMessage {
     u32 executed_shares;
     u64 match_number;
 };
+
+constexpr size_t get_message_size(std::byte c) {
+    switch (static_cast<char>(c)) {
+        case 'A': return sizeof(AddOrderNoMPIDMessage);
+        case 'D': return sizeof(OrderDeleteMessage);
+        case 'X': return sizeof(OrderCancelMessage);
+        case 'E': return sizeof(OrderExecutedMessage);
+        default: return 0;
+    }
+}

@@ -1,5 +1,5 @@
 #pragma once
-#include "util.cpp"
+#include "util.hpp"
 
 struct __attribute__((packed)) MessageHeader {
     u16 stock_locate;
