@@ -16,12 +16,23 @@ using f32 = float;
 using f64 = double;
 
 enum LogLevel { DEBUG, INFO, WARNING, ERROR };
-
 #define LOG(level, msg) \
     if (level >= CURRENT_LOG_LEVEL) \
         std::cout << #level << ": " << __FILE__ << ":" << __LINE__ << " - " << msg << std::endl
-
 #define CURRENT_LOG_LEVEL DEBUG
+
+template <typename Enum>
+constexpr auto to_underlying(Enum e) {
+    return static_cast<std::underlying_type_t<Enum>>(e);
+}
+
+template<typename Func>
+u64 time_ns(Func&& func) {
+    auto start = std::chrono::steady_clock::now();
+    func();
+    auto end = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+}
 
 template<typename T, std::size_t N>
 class BoundedQueue {
@@ -143,17 +154,3 @@ public:
     Iterator cbegin() const { return Iterator(this, 0); }
     Iterator cend() const { return Iterator(this, count); }    
 };
-
-
-template <typename Enum>
-constexpr auto to_underlying(Enum e) {
-    return static_cast<std::underlying_type_t<Enum>>(e);
-}
-
-template<typename Func>
-u64 time_ns(Func&& func) {
-    auto start = std::chrono::steady_clock::now();
-    func();
-    auto end = std::chrono::steady_clock::now();
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
-}
