@@ -1,14 +1,12 @@
-#include <algorithm>
-#include <utility>
-
 #include "util.hpp"
+#include <stdexcept>
 #include "orderbook.hpp"
 
-OrderSide char_to_order_side(std::byte indicator);
+#define DEBUG 0
 
 std::ostream& operator<<(std::ostream& os, const Order& ord) {
     os << "Order(id=" << ord.order_reference_id
-       << ", side=" << std::to_underlying(ord.side)
+       << ", side=" << static_cast<char>(ord.side)
        << ", policy=" << std::to_underlying(ord.execution_type)
        << ", time_in_force=" << std::to_underlying(ord.time_in_force)
        << ", price=" << (ord.has_price ? std::to_string(ord.price) : "market")
@@ -18,11 +16,18 @@ std::ostream& operator<<(std::ostream& os, const Order& ord) {
     return os;
 }
 
-OrderBook::OrderBook() : message_queue(10000) {} 
+OrderBook::OrderBook() : message_queue(10000) {
+    start();
+} 
 
 OrderBook::OrderBook(const std::string& sym, f32 ts)
     : tick_size(ts), message_queue(10000) {
-    std::snprintf(symbol, sizeof(symbol), "%s", sym.c_str());
+    symbol = sym;
+    start();
+}
+
+OrderBook::~OrderBook() {
+    stop();
 }
 
 void OrderBook::start() {
@@ -38,13 +43,20 @@ void OrderBook::stop() {
 }
 
 void OrderBook::submit_message(const OrderMessage& message) {
-    std::ignore = message_queue.try_push(message);
+    if(!message_queue.try_push(message)) {
+        throw std::runtime_error("Failed to push order to Message Queue");
+    }
 }
 
 void OrderBook::process_messages() {
     while(running) {
         OrderMessage* msg = message_queue.front();
-    
+
+        if(msg == nullptr) {
+            std::this_thread::sleep_for(std::chrono::microseconds(1));
+            continue;
+        }
+        
         if(!std::holds_alternative<std::monostate>(*msg)) {
             process_message(*msg);
         }
@@ -54,6 +66,7 @@ void OrderBook::process_messages() {
 
     while(true) {
         OrderMessage* msg = message_queue.front();
+
         if(msg == nullptr) break;
     
         process_message(*msg);
@@ -66,7 +79,7 @@ void OrderBook::process_message(const OrderMessage& msg) {
         [this] (const AddOrderNoMPIDMessage& msg) {
             Order order {
                 .order_reference_id = msg.order_reference_number,
-                .side = char_to_order_side(msg.buy_sell_indicator),
+                .side = msg.buy_sell_indicator,
                 .execution_type = OrderExecutionType::LIMIT,
                 .time_in_force = TimeInForce::GTC,
                 .price = msg.price,
@@ -89,7 +102,9 @@ void OrderBook::process_message(const OrderMessage& msg) {
         [this] (const std::monostate) {}
     }, msg);
 
-    print();
+    #if DEBUG
+        print();
+    #endif
 }
 
 void OrderBook::add_order(const Order& order) {
@@ -99,11 +114,30 @@ void OrderBook::add_order(const Order& order) {
 
     orders[order.order_reference_id] = order;
     
-    if (order.side == OrderSide::BUY) {
+    if (order.side == static_cast<std::byte>('B')) {
         bids[order.price].push_back(order.order_reference_id);
     } else {
         asks[order.price].push_back(order.order_reference_id);
     }
+}
+
+void OrderBook::add_order(f32 price, u32 quantity, char side, u64 order_id) {
+    Order order = {
+        .order_reference_id = order_id,
+        .side = static_cast<std::byte>(side),
+        .execution_type = OrderExecutionType::LIMIT,
+        .time_in_force = TimeInForce::GTC,
+        .price = price,
+        .quantity = quantity,
+        .timestamp_ns = get_ns_from_midnight(),
+        .has_price = true        
+    };
+    
+    add_order(order);
+
+    #if DEBUG
+        print();
+    #endif
 }
 
 Order& OrderBook::get_order_from_id(u64 order_id) {
@@ -113,11 +147,11 @@ Order& OrderBook::get_order_from_id(u64 order_id) {
 Order OrderBook::remove_order_from_id(u64 order_id) {
     Order order = orders.at(order_id);
     
-    auto& level = (order.side == OrderSide::BUY) ? bids[order.price] : asks[order.price];
+    auto& level = (order.side == static_cast<std::byte>(order.price)) ? bids[order.price] : asks[order.price];
     level.erase(std::find(level.begin(), level.end(), order_id));
     
     if (level.empty()) {
-        if (order.side == OrderSide::BUY) {
+        if (order.side == static_cast<std::byte>('B')) {
             bids.erase(order.price);
         } else {
             asks.erase(order.price);
@@ -158,17 +192,17 @@ void OrderBook::edit_book(const std::byte* ptr, size_t size) {
     const std::byte* end = ptr + size;
 
     while (ptr < end) {
-        std::byte type = *ptr;
+        char type = static_cast<char>(*ptr);
         size_t msg_size = get_message_size(type);
         if (msg_size == 0 || ptr + msg_size > end) break;
 
-        switch(static_cast<char>(type)) {
+        switch(type) {
             case 'A' : {
                 const AddOrderNoMPIDMessage* msg = reinterpret_cast<const AddOrderNoMPIDMessage*>(ptr);
 
                 Order order {
                     .order_reference_id = msg->order_reference_number,
-                    .side = char_to_order_side(msg->buy_sell_indicator),
+                    .side = msg->buy_sell_indicator,
                     .execution_type = OrderExecutionType::LIMIT,
                     .time_in_force = TimeInForce::GTC,
                     .price = msg->price,
@@ -182,6 +216,7 @@ void OrderBook::edit_book(const std::byte* ptr, size_t size) {
                 break;
             }
             case 'D' : {
+        
                 const OrderDeleteMessage* msg = reinterpret_cast<const OrderDeleteMessage*>(ptr);    
                 remove_order_from_id(msg->order_reference_number);
                 break;
@@ -229,7 +264,7 @@ f32 OrderBook::get_best_ask() {
     return asks.begin()->first;
 }
 
-const char* OrderBook::get_symbol() const {
+const std::string OrderBook::get_symbol() const {
     return symbol;
 }
 
@@ -237,6 +272,3 @@ f32 OrderBook::get_tick_size() const {
     return tick_size;
 }
 
-OrderSide char_to_order_side(std::byte indicator) {
-    return (static_cast<char>(indicator) == 'B') ? OrderSide::BUY : OrderSide::SELL;
-}
