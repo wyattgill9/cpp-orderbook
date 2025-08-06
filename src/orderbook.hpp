@@ -13,14 +13,6 @@
 #include "SPSCQueue.h"
 #include "util.hpp"
 
-using OrderMessage = std::variant<
-    std::monostate,
-    AddOrderNoMPIDMessage,
-    OrderDeleteMessage,
-    OrderCancelMessage,
-    OrderExecutedMessage
->;
-
 struct Order {
     u64 order_reference_id;
 
@@ -36,6 +28,15 @@ struct Order {
     friend std::ostream& operator<<(std::ostream& os, const Order& ord);
 };
 
+using OrderMessage = std::variant<
+    std::monostate,
+    Order,
+    AddOrderNoMPIDMessage,
+    OrderDeleteMessage,
+    OrderCancelMessage,
+    OrderExecutedMessage
+>;
+
 class OrderBook {
 public:
     OrderBook();
@@ -43,10 +44,7 @@ public:
 
     ~OrderBook();
 
-    void start();
-    void stop();
-
-    void add_order(f32 price, u32 quantity, char side, u64 order_id);
+    void add_order(f32 price, u32 quantity, char side);
     void submit_message(const OrderMessage& message);
     void edit_book(const std::byte* ptr, size_t size);
 
@@ -62,6 +60,7 @@ private:
     std::map<f32, std::deque<u64>, std::greater<f32>> bids;
     std::map<f32, std::deque<u64>> asks;
     
+    u64 last_order_id; // Only used when add order is called without id param   
     std::string symbol;
     f32 tick_size;
 
@@ -69,10 +68,14 @@ private:
     std::atomic<bool> running {false};
     std::thread processing_thread;
 
+
+    void start();
+    void stop();
+
     void process_messages();
     void process_message(const OrderMessage& msg);
 
-    void add_order(const Order& order);
+    void add_order_to_book(const Order& order);
 
     Order& get_order_from_id(u64 order_id);
     Order remove_order_from_id(u64 order_id);

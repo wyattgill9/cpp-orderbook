@@ -2,7 +2,8 @@
 
 int main() {
     auto ob = OrderBook("TSLA");
-    
+
+    // You can use ITCH standard protocol structs:
     AddOrderNoMPIDMessage add_order = {
         .header = {
             .message_type = 'A',
@@ -10,7 +11,7 @@ int main() {
             .tracking_number = 0,
             .timestamp = 1
         },
-        .order_reference_number = 1,
+        .order_reference_number = 0,
         .buy_sell_indicator = static_cast<std::byte>('B'),
         .shares = 1000,
         .stock = "TSLA",
@@ -19,8 +20,27 @@ int main() {
 
     ob.submit_message(add_order);
 
-    ob.add_order(0.01, 1000, 'B', 1);
+    // OR just add orders like you would normally
+    ob.add_order(0.01, 1000, 'B');
 
+    // OR make a buffer of multiple ITCH Messages and edit the book acordingly
+    std::byte buffer[1024];
+
+    OrderCancelMessage cancel_order = {
+         .header = {
+            .message_type = 'X',
+            .stock_locate = 0,
+            .tracking_number = 0,
+            .timestamp = 2
+        },
+        .order_reference_number = 0,
+        .cancelled_shares = 500
+    };
+
+    std::memcpy(buffer, &cancel_order, sizeof(cancel_order));
+    ob.edit_book(buffer, sizeof(buffer));
+
+    // Finally you can print out the OrderBook
     ob.print();
 
     return 0;

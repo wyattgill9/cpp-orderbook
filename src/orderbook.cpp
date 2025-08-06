@@ -16,12 +16,12 @@ std::ostream& operator<<(std::ostream& os, const Order& ord) {
     return os;
 }
 
-OrderBook::OrderBook() : message_queue(10000) {
+OrderBook::OrderBook() : message_queue(10000), last_order_id(0) {
     start();
 } 
 
 OrderBook::OrderBook(const std::string& sym, f32 ts)
-    : tick_size(ts), message_queue(10000) {
+    : tick_size(ts), message_queue(10000), last_order_id(0) {
     symbol = sym;
     start();
 }
@@ -46,6 +46,7 @@ void OrderBook::submit_message(const OrderMessage& message) {
     if(!message_queue.try_push(message)) {
         throw std::runtime_error("Failed to push order to Message Queue");
     }
+    std::this_thread::sleep_for(std::chrono::nanoseconds(1));
 }
 
 void OrderBook::process_messages() {
@@ -57,26 +58,24 @@ void OrderBook::process_messages() {
             continue;
         }
         
+        message_queue.pop();
+
         if(!std::holds_alternative<std::monostate>(*msg)) {
             process_message(*msg);
         }
-
-        message_queue.pop();
-    }
-
-    while(true) {
-        OrderMessage* msg = message_queue.front();
-
-        if(msg == nullptr) break;
-    
-        process_message(*msg);
-        message_queue.pop();
     }
 }
 
 void OrderBook::process_message(const OrderMessage& msg) {
     std::visit(overloaded {
+        [this] (const Order& order) {
+            add_order_to_book(order);            
+        },
         [this] (const AddOrderNoMPIDMessage& msg) {
+            if(msg.stock != get_symbol()) {
+                throw std::runtime_error("AddOrderNoMPIDMessage Stock/Symbol failed to match OrderBook Symbol field");
+            }
+
             Order order {
                 .order_reference_id = msg.order_reference_number,
                 .side = msg.buy_sell_indicator,
@@ -88,7 +87,7 @@ void OrderBook::process_message(const OrderMessage& msg) {
                 .has_price = true
             };            
 
-            add_order(order);
+            add_order_to_book(order);
         },
         [this] (const OrderDeleteMessage& msg) {    
             remove_order_from_id(msg.order_reference_number);
@@ -99,7 +98,7 @@ void OrderBook::process_message(const OrderMessage& msg) {
         [this] (const OrderExecutedMessage& msg) {
             execute_order(msg.order_reference_number, msg.executed_shares, msg.match_number);
         },
-        [this] (const std::monostate) {}
+        [this] (const std::monostate) {} // default
     }, msg);
 
     #if DEBUG
@@ -107,7 +106,7 @@ void OrderBook::process_message(const OrderMessage& msg) {
     #endif
 }
 
-void OrderBook::add_order(const Order& order) {
+void OrderBook::add_order_to_book(const Order& order) {
     if (!order.has_price) {
         return;
     }
@@ -121,9 +120,14 @@ void OrderBook::add_order(const Order& order) {
     }
 }
 
-void OrderBook::add_order(f32 price, u32 quantity, char side, u64 order_id) {
+void OrderBook::add_order(f32 price, u32 quantity, char side) {
+    // if hashmap has that order id ++ until it doesnt
+    while (orders.contains(last_order_id)) {
+        ++last_order_id;
+    }
+           
     Order order = {
-        .order_reference_id = order_id,
+        .order_reference_id = last_order_id,
         .side = static_cast<std::byte>(side),
         .execution_type = OrderExecutionType::LIMIT,
         .time_in_force = TimeInForce::GTC,
@@ -132,9 +136,9 @@ void OrderBook::add_order(f32 price, u32 quantity, char side, u64 order_id) {
         .timestamp_ns = get_ns_from_midnight(),
         .has_price = true        
     };
-    
-    add_order(order);
 
+    submit_message(order);
+    
     #if DEBUG
         print();
     #endif
@@ -146,8 +150,7 @@ Order& OrderBook::get_order_from_id(u64 order_id) {
 
 Order OrderBook::remove_order_from_id(u64 order_id) {
     Order order = orders.at(order_id);
-    
-    auto& level = (order.side == static_cast<std::byte>(order.price)) ? bids[order.price] : asks[order.price];
+    auto& level = (order.side == static_cast<std::byte>('B')) ? bids[order.price] : asks[order.price];
     level.erase(std::find(level.begin(), level.end(), order_id));
     
     if (level.empty()) {
@@ -200,6 +203,10 @@ void OrderBook::edit_book(const std::byte* ptr, size_t size) {
             case 'A' : {
                 const AddOrderNoMPIDMessage* msg = reinterpret_cast<const AddOrderNoMPIDMessage*>(ptr);
 
+                if(msg->stock != get_symbol()) {
+                    throw std::runtime_error("AddOrderNoMPIDMessage Stock/Symbol failed to match OrderBook Symbol field");
+                }
+
                 Order order {
                     .order_reference_id = msg->order_reference_number,
                     .side = msg->buy_sell_indicator,
@@ -211,7 +218,7 @@ void OrderBook::edit_book(const std::byte* ptr, size_t size) {
                     .has_price = true 
                 };
 
-                add_order(order);
+                add_order_to_book(order);
 
                 break;
             }
@@ -271,4 +278,3 @@ const std::string OrderBook::get_symbol() const {
 f32 OrderBook::get_tick_size() const {
     return tick_size;
 }
-

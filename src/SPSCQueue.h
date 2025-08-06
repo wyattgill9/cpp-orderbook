@@ -27,8 +27,10 @@ SOFTWARE.
 #include <cstddef>
 #include <memory> // std::allocator
 #include <new>    // std::hardware_destructive_interference_size
+#include <iostream>
 #include <stdexcept>
 #include <type_traits> // std::enable_if, std::is_*_constructible
+#include <variant>
 
 #ifdef __has_cpp_attribute
 #if __has_cpp_attribute(nodiscard)
