@@ -21,8 +21,15 @@ int main() {
     ob.submit_message(add_order);
 
     // OR just add orders like you would normally
-    ob.add_order(0.01, 1000, 'B');
 
+    ob.add_order(0.01, 100, 'B'); 
+
+    // for(int price = 1; price <= 1000; price++) {
+    //     for(int quantity = 1; quantity <= 1000; quantity++) {
+    //         ob.add_order(price, quantity, 'B'); 
+    //     }
+    // }
+    
     // OR make a buffer of multiple ITCH Messages and edit the book acordingly
     std::byte buffer[1024];
 

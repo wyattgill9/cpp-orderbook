@@ -80,6 +80,16 @@ struct __attribute__((packed)) OrderExecutedMessage {
     u64 match_number;
 };
 
+// 'U'
+struct __attribute__((packed)) OrderReplaceMessage {
+    MessageHeader header;
+    u64 original_order_reference_number;
+    u64 new_order_reference_number;
+    u32 shares;
+    f32 price;
+};
+
+
 constexpr size_t get_message_size(char c) {
     switch (c) {
         case 'A': return sizeof(AddOrderNoMPIDMessage);

@@ -1,5 +1,5 @@
 #pragma once
-#include "util.hpp"
+// #include "src/util.hpp"
 
 struct __attribute__((packed)) MessageHeader {
     u16 stock_locate;
@@ -98,15 +98,15 @@ struct __attribute__((packed)) OperationalHaltMessage {
     u8 operation_halt_message;
 };
 
-// 'A'
-struct __attribute__((packed)) AddOrderNoMPIDMessage {
-    MessageHeader header;
-    u64 order_reference_number;
-    u8 buy_sell_indicator;
-    u32 shares;
-    char stock[8];
-    f32 price;
-};
+// // 'A'
+// struct __attribute__((packed)) AddOrderNoMPIDMessage {
+//     MessageHeader header;
+//     u64 order_reference_number;
+//     u8 buy_sell_indicator;
+//     u32 shares;
+//     char stock[8];
+//     f32 price;
+// };
 
 // 'F'
 struct __attribute__((packed)) AddOrderWithMPIDMessage {
@@ -119,13 +119,13 @@ struct __attribute__((packed)) AddOrderWithMPIDMessage {
     char attribution[4];
 };
 
-// 'E'
-struct __attribute__((packed)) OrderExecutedMessage {
-    MessageHeader header;
-    u64 order_reference_number;
-    u32 executed_shares;
-    u64 match_number;
-};
+// // 'E'
+// struct __attribute__((packed)) OrderExecutedMessage {
+//     MessageHeader header;
+//     u64 order_reference_number;
+//     u32 executed_shares;
+//     u64 match_number;
+// };
 
 // 'C'
 struct __attribute__((packed)) OrderExecutedwithPriceMessage {
@@ -137,18 +137,18 @@ struct __attribute__((packed)) OrderExecutedwithPriceMessage {
     f32 execution_price;
 };
 
-// 'X'
-struct __attribute__((packed)) OrderCancelMessage {
-    MessageHeader header;
-    u64 order_reference_number;
-    u32 cancelled_shares;
-};
+// // 'X'
+// struct __attribute__((packed)) OrderCancelMessage {
+//     MessageHeader header;
+//     u64 order_reference_number;
+//     u32 cancelled_shares;
+// };
 
-// 'D'
-struct __attribute__((packed)) OrderDeleteMessage {
-    MessageHeader header;
-    u64 order_reference_number;
-};
+// // 'D'
+// struct __attribute__((packed)) OrderDeleteMessage {
+//     MessageHeader header;
+//     u64 order_reference_number;
+// };
 
 // 'U'
 struct __attribute__((packed)) OrderReplaceMessage {

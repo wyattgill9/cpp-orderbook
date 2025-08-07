@@ -1,6 +1,9 @@
-#include "util.hpp"
 #include <stdexcept>
+
+#include "util.hpp"
 #include "orderbook.hpp"
+
+constexpr static std::byte BUY_BYTE = static_cast<std::byte>('B');
 
 #define DEBUG 0
 
@@ -98,6 +101,9 @@ void OrderBook::process_message(const OrderMessage& msg) {
         [this] (const OrderExecutedMessage& msg) {
             execute_order(msg.order_reference_number, msg.executed_shares, msg.match_number);
         },
+        [this] (const OrderReplaceMessage& msg) {
+            replace_order(msg.original_order_reference_number, msg.new_order_reference_number, msg.shares, msg.price);  
+        },
         [this] (const std::monostate) {} // default
     }, msg);
 
@@ -106,26 +112,12 @@ void OrderBook::process_message(const OrderMessage& msg) {
     #endif
 }
 
-void OrderBook::add_order_to_book(const Order& order) {
-    if (!order.has_price) {
-        return;
-    }
-
-    orders[order.order_reference_id] = order;
-    
-    if (order.side == static_cast<std::byte>('B')) {
-        bids[order.price].push_back(order.order_reference_id);
-    } else {
-        asks[order.price].push_back(order.order_reference_id);
-    }
-}
-
 void OrderBook::add_order(f32 price, u32 quantity, char side) {
     // if hashmap has that order id ++ until it doesnt
-    while (orders.contains(last_order_id)) {
+    while (order_id_map.contains(last_order_id)) {
         ++last_order_id;
     }
-           
+        
     Order order = {
         .order_reference_id = last_order_id,
         .side = static_cast<std::byte>(side),
@@ -137,31 +129,47 @@ void OrderBook::add_order(f32 price, u32 quantity, char side) {
         .has_price = true        
     };
 
-    submit_message(order);
-    
+    // submit_message(order);
+    add_order_to_book(order);
+        
     #if DEBUG
         print();
     #endif
 }
 
+void OrderBook::add_order_to_book(const Order& order) {
+    if (!order.has_price) {
+        return;
+    }
+
+    order_id_map[order.order_reference_id] = order;
+    
+    if (order.side == BUY_BYTE) {
+        bids[order.price].push_back(order.order_reference_id);
+    } else {
+        asks[order.price].push_back(order.order_reference_id);
+    }
+}
+
+
 Order& OrderBook::get_order_from_id(u64 order_id) {
-    return orders.at(order_id);
+    return order_id_map.at(order_id);
 }
 
 Order OrderBook::remove_order_from_id(u64 order_id) {
-    Order order = orders.at(order_id);
-    auto& level = (order.side == static_cast<std::byte>('B')) ? bids[order.price] : asks[order.price];
+    Order& order = get_order_from_id(order_id);
+    auto& level = (order.side == BUY_BYTE) ? bids[order.price] : asks[order.price];
     level.erase(std::find(level.begin(), level.end(), order_id));
     
     if (level.empty()) {
-        if (order.side == static_cast<std::byte>('B')) {
+        if (order.side == BUY_BYTE) {
             bids.erase(order.price);
         } else {
             asks.erase(order.price);
         }
     }
     
-    orders.erase(order_id);
+    order_id_map.erase(order_id);
     
     return order;
 }
@@ -175,73 +183,35 @@ void OrderBook::cancel_order(u64 order_id, u32 cancelled_shares) {
     }       
 }   
 
-void OrderBook::execute_order(u64 order_id, u32 executed_shares, u64 match_order_id) {
+void OrderBook::execute_order(u64 order_id, u32 executed_shares, u64 match_number) {
     Order& order = get_order_from_id(order_id);
     order.quantity -= executed_shares;
 
-    Order& match_order = get_order_from_id(match_order_id);
-    match_order.quantity -= executed_shares;
-   
     if (order.quantity == 0) {
         remove_order_from_id(order_id);
     }
-
-    if(match_order.quantity == 0) {
-        remove_order_from_id(match_order_id);
-    }
 }
 
-void OrderBook::edit_book(const std::byte* ptr, size_t size) {
-    const std::byte* end = ptr + size;
+// 'U'
+// struct __attribute__((packed)) OrderReplaceMessage {
+//     MessageHeader header;
+//     u64 original_order_reference_number;
+//     u64 new_order_reference_number;
+//     u32 shares;
+//     f32 price;
+// }
 
-    while (ptr < end) {
-        char type = static_cast<char>(*ptr);
-        size_t msg_size = get_message_size(type);
-        if (msg_size == 0 || ptr + msg_size > end) break;
+// todo refactor this maybe just remove an order off the bat and make a new order cause were
+// giving the shares, price and new order id
+void OrderBook::replace_order(u64 original_order_id, u64 new_order_id, u32 shares, f32 price) {
+    Order new_order = get_order_from_id(original_order_id);
 
-        switch(type) {
-            case 'A' : {
-                const AddOrderNoMPIDMessage* msg = reinterpret_cast<const AddOrderNoMPIDMessage*>(ptr);
-
-                if(msg->stock != get_symbol()) {
-                    throw std::runtime_error("AddOrderNoMPIDMessage Stock/Symbol failed to match OrderBook Symbol field");
-                }
-
-                Order order {
-                    .order_reference_id = msg->order_reference_number,
-                    .side = msg->buy_sell_indicator,
-                    .execution_type = OrderExecutionType::LIMIT,
-                    .time_in_force = TimeInForce::GTC,
-                    .price = msg->price,
-                    .quantity = msg->shares,
-                    .timestamp_ns = msg->header.timestamp,
-                    .has_price = true 
-                };
-
-                add_order_to_book(order);
-
-                break;
-            }
-            case 'D' : {
+    new_order.order_reference_id = new_order_id;
+    new_order.price = price;
         
-                const OrderDeleteMessage* msg = reinterpret_cast<const OrderDeleteMessage*>(ptr);    
-                remove_order_from_id(msg->order_reference_number);
-                break;
-            }
-            case 'X' : {
-                const OrderCancelMessage* msg = reinterpret_cast<const OrderCancelMessage*>(ptr);    
-                cancel_order(msg->order_reference_number, msg->cancelled_shares);
-                break;
-            }
-            case 'E' : {
-                const OrderExecutedMessage* msg = reinterpret_cast<const OrderExecutedMessage*>(ptr);    
-                execute_order(msg->order_reference_number, msg->executed_shares, msg->match_number);
-                break;
-            }
-        }
+    remove_order_from_id(original_order_id);
 
-        ptr += msg_size;
-    }
+    add_order_to_book(new_order);
 }
 
 void OrderBook::print() const {
@@ -249,7 +219,7 @@ void OrderBook::print() const {
     for (const auto& [price, order_ids] : bids) {
         std::cout << "Price " << price << ":" << std::endl;
         for (u64 order_id : order_ids) {
-            std::cout << "  " << orders.at(order_id) << std::endl;
+            std::cout << "  " << order_id_map.at(order_id) << std::endl;
         }
     }
 
@@ -257,7 +227,7 @@ void OrderBook::print() const {
     for (const auto& [price, order_ids] : asks) {
         std::cout << "Price " << price << ":" << std::endl;
         for (u64 order_id : order_ids) {
-            std::cout << "  " << orders.at(order_id) << std::endl;
+            std::cout << "  " << order_id_map.at(order_id) << std::endl;
         }
     }
     std::cout << std::endl;
@@ -278,3 +248,8 @@ const std::string OrderBook::get_symbol() const {
 f32 OrderBook::get_tick_size() const {
     return tick_size;
 }
+
+// TODO IMPLEMENT ITERATOR ON ORDERBOOK SO I CAN DO
+// for(auto& order : ob) {
+    // ob.remove_order(order.order_reference_id);
+// }
