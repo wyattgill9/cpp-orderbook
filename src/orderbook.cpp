@@ -74,9 +74,12 @@ void OrderBook::process_message(const OrderMessage& msg) {
         [this] (const Order& order) {
             add_order_to_book(order);            
         },
-        [this] (const AddOrderNoMPIDMessage& msg) {
+        [this](const auto& msg) requires (
+            std::same_as<std::decay_t<decltype(msg)>, AddOrderWithMPIDMessage> || // for now ignore MPID
+            std::same_as<std::decay_t<decltype(msg)>, AddOrderNoMPIDMessage>
+        ) {
             if(msg.stock != get_symbol()) {
-                throw std::runtime_error("AddOrderNoMPIDMessage Stock/Symbol failed to match OrderBook Symbol field");
+                throw std::runtime_error("AddOrderNoMPIDMessage/AddOrderWithMPIDMessage Stock/Symbol failed to match OrderBook Symbol field");
             }
 
             Order order {
@@ -101,9 +104,33 @@ void OrderBook::process_message(const OrderMessage& msg) {
         [this] (const OrderExecutedMessage& msg) {
             execute_order(msg.order_reference_number, msg.executed_shares, msg.match_number);
         },
+        [this] (const OrderExecutedwithPriceMessage& msg) { // todo, do smt with executed with price its a liite different
+            execute_order(msg.order_reference_number, msg.executed_shares, msg.match_number);
+        }, 
         [this] (const OrderReplaceMessage& msg) {
             replace_order(msg.original_order_reference_number, msg.new_order_reference_number, msg.shares, msg.price);  
         },
+        // Since Trade Messages do not affect the book,
+        // however, they may be ignored by firms just looking to
+        // build and track the Nasdaq execution system
+        [this] (const TradeMessage& msg) {},
+
+        // TODO
+        [this] (const StockDirectoryMessage& msg) {}, // just metadata
+        [this] (const StockTradingActionMessage& msg) {},
+        [this] (const SystemEventMessage& msg) {},
+        [this] (const CrossTradeMessage& msg) {},               
+        [this] (const BrokenTradeMessage& msg) {},
+        [this] (const NOIIMessage& msg) {},
+        [this] (const DirectListingWithCapitalRaisePriceMessage& msg) {},
+        [this] (const MarketParticipantPositionMessage& msg) {},
+        [this] (const ShortSalePriceTestMessage& msg) {},
+        [this] (const MWCBDeclineLevelMessage& msg) {},
+        [this] (const MWCBStatusMessage& msg) {},
+        [this] (const QuotingPeriodUpdateMessage& msg) {},
+        [this] (const LULDAuctionCollarMessage& msg) {},
+        [this] (const OperationalHaltMessage& msg) {},
+
         [this] (const std::monostate) {} // default
     }, msg);
 
@@ -192,19 +219,8 @@ void OrderBook::execute_order(u64 order_id, u32 executed_shares, u64 match_numbe
     }
 }
 
-// 'U'
-// struct __attribute__((packed)) OrderReplaceMessage {
-//     MessageHeader header;
-//     u64 original_order_reference_number;
-//     u64 new_order_reference_number;
-//     u32 shares;
-//     f32 price;
-// }
-
-// todo refactor this maybe just remove an order off the bat and make a new order cause were
-// giving the shares, price and new order id
 void OrderBook::replace_order(u64 original_order_id, u64 new_order_id, u32 shares, f32 price) {
-    Order new_order = get_order_from_id(original_order_id);
+    Order new_order = get_order_from_id(original_order_id); // take most of the original orders data
 
     new_order.order_reference_id = new_order_id;
     new_order.price = price;
@@ -234,11 +250,11 @@ void OrderBook::print() const {
 }
 
 f32 OrderBook::get_best_bid() {
-    return bids.begin()->first;
+    return bids.empty() ? 0.0 : bids.begin()->first;
 }
 
 f32 OrderBook::get_best_ask() {
-    return asks.begin()->first;
+    return asks.empty() ? 0.0 : asks.begin()->first;
 }
 
 const std::string OrderBook::get_symbol() const {
@@ -248,8 +264,3 @@ const std::string OrderBook::get_symbol() const {
 f32 OrderBook::get_tick_size() const {
     return tick_size;
 }
-
-// TODO IMPLEMENT ITERATOR ON ORDERBOOK SO I CAN DO
-// for(auto& order : ob) {
-    // ob.remove_order(order.order_reference_id);
-// }

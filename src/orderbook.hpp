@@ -32,9 +32,27 @@ using OrderMessage = std::variant<
     std::monostate,
     Order,
     AddOrderNoMPIDMessage,
+    AddOrderWithMPIDMessage,
     OrderDeleteMessage,
     OrderCancelMessage,
-    OrderExecutedMessage
+    OrderExecutedMessage,
+    OrderExecutedwithPriceMessage,
+    OrderReplaceMessage,
+    TradeMessage,
+    StockDirectoryMessage,
+    StockTradingActionMessage,
+    SystemEventMessage,
+    CrossTradeMessage,
+    BrokenTradeMessage,
+    NOIIMessage,
+    DirectListingWithCapitalRaisePriceMessage,
+    MarketParticipantPositionMessage,  // 'L'
+    ShortSalePriceTestMessage,         // 'Y'
+    MWCBDeclineLevelMessage,           // 'V'
+    MWCBStatusMessage,                 // 'W'
+    QuotingPeriodUpdateMessage,        // 'K'
+    LULDAuctionCollarMessage,          // 'J'
+    OperationalHaltMessage             // 'h'
 >;
 
 class OrderBook {

@@ -29,10 +29,12 @@ int main() {
     //         ob.add_order(price, quantity, 'B'); 
     //     }
     // }
-    
+
+
+    // TODO REMOVE THE EDIT BOOK IN FAVOR OF ABOVE
     // OR make a buffer of multiple ITCH Messages and edit the book acordingly
     std::byte buffer[1024];
-
+    
     OrderCancelMessage cancel_order = {
          .header = {
             .message_type = 'X',

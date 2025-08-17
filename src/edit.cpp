@@ -1,6 +1,8 @@
 #include "orderbook.hpp"
 #include "util.hpp"
 
+
+// OUTDATED DO NOT USE
 void OrderBook::edit_book(const std::byte* ptr, size_t size) {
     const std::byte* end = ptr + size;
 
@@ -31,6 +33,28 @@ void OrderBook::edit_book(const std::byte* ptr, size_t size) {
                 add_order_to_book(order);
 
                 break;
+            }
+            case 'F' : {
+                 const AddOrderWithMPIDMessage* msg = reinterpret_cast<const AddOrderWithMPIDMessage*>(ptr);
+
+                if(msg->stock != get_symbol()) {
+                    throw std::runtime_error("AddOrderNoMPIDMessage Stock/Symbol failed to match OrderBook Symbol field");
+                }
+
+                Order order {
+                    .order_reference_id = msg->order_reference_number,
+                    .side = msg->buy_sell_indicator,
+                    .execution_type = OrderExecutionType::LIMIT,
+                    .time_in_force = TimeInForce::GTC,
+                    .price = msg->price,
+                    .quantity = msg->shares,
+                    .timestamp_ns = msg->header.timestamp,
+                    .has_price = true 
+                };
+
+                add_order_to_book(order);
+
+                break;                   
             }
             case 'D' : {
                 const OrderDeleteMessage* msg = reinterpret_cast<const OrderDeleteMessage*>(ptr);    
