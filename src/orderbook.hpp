@@ -1,16 +1,14 @@
 #pragma once
 
-#include <deque>
-#include <map>
+// #include <map>
 #include <unordered_map>
 #include <variant>
-#include <atomic>
-#include <thread>
 #include <iostream>
 #include <cstring>
 #include <string>
+// #include <vector>
+#include "absl/container/btree_map.h"
 
-#include "SPSCQueue.h"
 #include "util.hpp"
 
 struct Order {
@@ -30,7 +28,6 @@ struct Order {
 
 using OrderMessage = std::variant<
     std::monostate,
-    Order,
     AddOrderNoMPIDMessage,
     AddOrderWithMPIDMessage,
     OrderDeleteMessage,
@@ -76,24 +73,13 @@ public:
 
 private:
     std::unordered_map<u64, Order> order_id_map;
-    std::map<f32, std::deque<u64>, std::greater<f32>> bids;
-    std::map<f32, std::deque<u64>> asks;
+    absl::btree_map<f32, std::vector<u64>, std::greater<f32>> bids;
+    absl::btree_map<f32, std::vector<u64>> asks;
     
     u64 last_order_id; // Only used when add order is called without id param   
     std::string symbol;
     f32 tick_size;
 
-    rigtorp::SPSCQueue<OrderMessage> message_queue;
-    std::atomic<bool> running {false};
-    std::thread processing_thread;
-
-    void start();
-    void stop();
-
-    void process_messages();
-    void process_message(const OrderMessage& msg);
-
-    // void add_order_to_book(const Order& order);
     Order& get_order_from_id(u64 order_id);
     Order remove_order_from_id(u64 order_id);
     void cancel_order(u64 order_id, u32 cancelled_shares);

@@ -1,4 +1,4 @@
-#include <stdexcept>
+// #include <stdexcept>
 
 #include "util.hpp"
 #include "orderbook.hpp"
@@ -19,61 +19,17 @@ std::ostream& operator<<(std::ostream& os, const Order& ord) {
     return os;
 }
 
-OrderBook::OrderBook() : message_queue(10000), last_order_id(0) {
-    start();
-} 
+OrderBook::OrderBook() : last_order_id(0) {} 
 
 OrderBook::OrderBook(const std::string& sym, f32 ts)
-    : tick_size(ts), message_queue(10000), last_order_id(0) {
+    : tick_size(ts), last_order_id(0) {
     symbol = sym;
-    start();
 }
 
-OrderBook::~OrderBook() {
-    stop();
-}
+OrderBook::~OrderBook() = default;
 
-void OrderBook::start() {
-    running = true;
-    processing_thread = std::thread(&OrderBook::process_messages, this);
-}
-
-void OrderBook::stop() {
-    running = false;
-    if(processing_thread.joinable()) {
-        processing_thread.join();
-    } 
-}
-
-void OrderBook::submit_message(const OrderMessage& message) {
-    if(!message_queue.try_push(message)) {
-        throw std::runtime_error("Failed to push order to Message Queue");
-    }
-    std::this_thread::sleep_for(std::chrono::nanoseconds(1));
-}
-
-void OrderBook::process_messages() {
-    while(running) {
-        OrderMessage* msg = message_queue.front();
-
-        if(msg == nullptr) {
-            std::this_thread::sleep_for(std::chrono::microseconds(1));
-            continue;
-        }
-        
-        message_queue.pop();
-
-        if(!std::holds_alternative<std::monostate>(*msg)) {
-            process_message(*msg);
-        }
-    }
-}
-
-void OrderBook::process_message(const OrderMessage& msg) {
+void OrderBook::submit_message(const OrderMessage& msg) {
     std::visit(overloaded {
-        [this] (const Order& order) {
-            add_order_to_book(order);            
-        },
         [this](const auto& msg) requires (
             std::same_as<std::decay_t<decltype(msg)>, AddOrderWithMPIDMessage> || // for now ignore MPID
             std::same_as<std::decay_t<decltype(msg)>, AddOrderNoMPIDMessage>
@@ -82,8 +38,13 @@ void OrderBook::process_message(const OrderMessage& msg) {
                 throw std::runtime_error("AddOrderNoMPIDMessage/AddOrderWithMPIDMessage Stock/Symbol failed to match OrderBook Symbol field");
             }
 
+            u64 id = msg.order_reference_number;
+            while (order_id_map.contains(id)) {
+                ++id;
+            }
+
             Order order {
-                .order_reference_id = msg.order_reference_number,
+                .order_reference_id = id,
                 .side = msg.buy_sell_indicator,
                 .execution_type = OrderExecutionType::LIMIT,
                 .time_in_force = TimeInForce::GTC,
@@ -172,9 +133,9 @@ void OrderBook::add_order_to_book(const Order& order) {
     order_id_map[order.order_reference_id] = order;
     
     if (order.side == BUY_BYTE) {
-        bids[order.price].push_back(order.order_reference_id);
+        bids[order.price].emplace_back(order.order_reference_id);
     } else {
-        asks[order.price].push_back(order.order_reference_id);
+        asks[order.price].emplace_back(order.order_reference_id);
     }
 }
 
